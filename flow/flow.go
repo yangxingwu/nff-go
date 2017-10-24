@@ -131,7 +131,7 @@ func makeGeneratorPerf(out *low.Queue, generateFunction GenerateFunction,
 	par.mempool = low.CreateMempool()
 	par.vectorGenerateFunction = vectorGenerateFunction
 	ffCount++
-	return schedState.NewGenerateFlowFunction("fast generator", ffCount, generatePerf, par, float64(targetSpeed), make(chan uint64, 50), context)
+	return schedState.NewGenerateFlowFunction("fast generator", ffCount, generatePerf, par, float64(targetSpeed), context)
 }
 
 type sendParameters struct {
@@ -186,7 +186,7 @@ func makeSeparator(in *low.Queue, outTrue *low.Queue, outFalse *low.Queue,
 	par.separateFunction = separateFunction
 	par.vectorSeparateFunction = vectorSeparateFunction
 	ffCount++
-	return schedState.NewClonableFlowFunction(name, ffCount, separate, par, separateCheck, make(chan uint64, 50), context)
+	return schedState.NewClonableFlowFunction(name, ffCount, separate, par, separateCheck, context)
 }
 
 type splitParameters struct {
@@ -204,7 +204,7 @@ func makeSplitter(in *low.Queue, outs []*low.Queue,
 	par.splitFunction = splitFunction
 	par.flowNumber = flowNumber
 	ffCount++
-	return schedState.NewClonableFlowFunction("splitter", ffCount, split, par, splitCheck, make(chan uint64, 50), context)
+	return schedState.NewClonableFlowFunction("splitter", ffCount, split, par, splitCheck, context)
 }
 
 type handleParameters struct {
@@ -223,7 +223,7 @@ func makeHandler(in *low.Queue, out *low.Queue,
 	par.handleFunction = handleFunction
 	par.vectorHandleFunction = vectorHandleFunction
 	ffCount++
-	return schedState.NewClonableFlowFunction(name, ffCount, handle, par, handleCheck, make(chan uint64, 50), context)
+	return schedState.NewClonableFlowFunction(name, ffCount, handle, par, handleCheck, context)
 }
 
 type writeParameters struct {
@@ -697,7 +697,7 @@ func generateOne(parameters interface{}, core uint8) {
 	}
 }
 
-func generatePerf(parameters interface{}, stopper chan int, report chan uint64, context scheduler.UserContext) {
+func generatePerf(parameters interface{}, stopper chan int, report chan scheduler.ReportPair, context scheduler.UserContext) {
 	gp := parameters.(*generateParameters)
 	OUT := gp.out
 	generateFunction := gp.generateFunction
@@ -708,7 +708,7 @@ func generatePerf(parameters interface{}, stopper chan int, report chan uint64, 
 	bufs := make([]uintptr, burstSize)
 	var tempPacket *packet.Packet
 	tempPackets := make([]*packet.Packet, burstSize)
-	var currentSpeed uint64
+	var currentSpeed scheduler.ReportPair
 	tick := time.Tick(time.Duration(schedTime) * time.Millisecond)
 	var pause int
 
@@ -727,7 +727,8 @@ func generatePerf(parameters interface{}, stopper chan int, report chan uint64, 
 			}
 		case <-tick:
 			report <- currentSpeed
-			currentSpeed = 0
+			currentSpeed.SpeedPKTS = 0
+			currentSpeed.SpeedMbits = 0
 		default:
 			low.AllocateMbufs(bufs, mempool)
 			if vector == false {
@@ -741,7 +742,7 @@ func generatePerf(parameters interface{}, stopper chan int, report chan uint64, 
 				vectorGenerateFunction(tempPackets, burstSize, context)
 			}
 			safeEnqueue(OUT, bufs, burstSize)
-			currentSpeed = currentSpeed + uint64(burstSize)
+			currentSpeed.SpeedPKTS += uint64(burstSize)
 			// GO parks goroutines while Sleep. So Sleep lasts more time than our precision
 			// we just want to slow goroutine down without parking, so loop is OK for this.
 			// time.Now lasts approximately 70ns and this satisfies us
@@ -824,7 +825,7 @@ func separateCheck(parameters interface{}, debug bool) bool {
 	return false
 }
 
-func separate(parameters interface{}, stopper chan int, report chan uint64, context scheduler.UserContext) {
+func separate(parameters interface{}, stopper chan int, report chan scheduler.ReportPair, context scheduler.UserContext) {
 	sp := parameters.(*separateParameters)
 	IN := sp.in
 	OUTTrue := sp.outTrue
@@ -841,7 +842,7 @@ func separate(parameters interface{}, stopper chan int, report chan uint64, cont
 	var tempPacket *packet.Packet
 	var tempPacketAddr uintptr
 	tempPackets := make([]*packet.Packet, burstSize)
-	var currentSpeed uint64
+	var currentSpeed scheduler.ReportPair
 	tick := time.Tick(time.Duration(schedTime) * time.Millisecond)
 	var pause int
 
@@ -860,7 +861,8 @@ func separate(parameters interface{}, stopper chan int, report chan uint64, cont
 			}
 		case <-tick:
 			report <- currentSpeed
-			currentSpeed = 0
+			currentSpeed.SpeedPKTS = 0
+			currentSpeed.SpeedMbits = 0
 		default:
 			n := IN.DequeueBurst(bufsIn, burstSize)
 			if n == 0 {
@@ -884,6 +886,7 @@ func separate(parameters interface{}, stopper chan int, report chan uint64, cont
 					} else {
 						bufsTrue[uint(i)-countOfPackets] = bufsIn[i]
 					}
+					currentSpeed.SpeedMbits += uint64(tempPacket.GetPacketLen())
 				}
 				if separateFunction(packet.ToPacket(tempPacketAddr), context) == false {
 					bufsFalse[countOfPackets] = bufsIn[n-1]
@@ -891,6 +894,7 @@ func separate(parameters interface{}, stopper chan int, report chan uint64, cont
 				} else {
 					bufsTrue[uint(n-1)-countOfPackets] = bufsIn[n-1]
 				}
+				currentSpeed.SpeedMbits += uint64(packet.ToPacket(tempPacketAddr).GetPacketLen())
 			} else {
 				// TODO add prefetch for vector functions
 				packet.ExtractPackets(tempPackets, bufsIn, n)
@@ -911,7 +915,7 @@ func separate(parameters interface{}, stopper chan int, report chan uint64, cont
 				c := n - countOfPackets
 				safeEnqueue(OUTTrue, bufsTrue, uint(c))
 			}
-			currentSpeed += uint64(n)
+			currentSpeed.SpeedPKTS += uint64(n)
 		}
 	}
 }
@@ -977,7 +981,7 @@ func splitCheck(parameters interface{}, debug bool) bool {
 	return false
 }
 
-func split(parameters interface{}, stopper chan int, report chan uint64, context scheduler.UserContext) {
+func split(parameters interface{}, stopper chan int, report chan scheduler.ReportPair, context scheduler.UserContext) {
 	sp := parameters.(*splitParameters)
 	IN := sp.in
 	OUT := sp.outs
@@ -993,7 +997,7 @@ func split(parameters interface{}, stopper chan int, report chan uint64, context
 	}
 	var tempPacket *packet.Packet
 	var tempPacketAddr uintptr
-	var currentSpeed uint64
+	var currentSpeed scheduler.ReportPair
 	tick := time.Tick(time.Duration(schedTime) * time.Millisecond)
 	var pause int
 
@@ -1012,7 +1016,8 @@ func split(parameters interface{}, stopper chan int, report chan uint64, context
 			}
 		case <-tick:
 			report <- currentSpeed
-			currentSpeed = 0
+			currentSpeed.SpeedPKTS = 0
+			currentSpeed.SpeedMbits = 0
 		default:
 			n := IN.DequeueBurst(InputMbufs, burstSize)
 			if n == 0 {
@@ -1029,17 +1034,19 @@ func split(parameters interface{}, stopper chan int, report chan uint64, context
 				index := splitFunction(tempPacket, context)
 				OutputMbufs[index][countOfPackets[index]] = InputMbufs[i]
 				countOfPackets[index]++
+				currentSpeed.SpeedMbits += uint64(tempPacket.GetPacketLen())
 			}
 			index := splitFunction(packet.ToPacket(tempPacketAddr), context)
 			OutputMbufs[index][countOfPackets[index]] = InputMbufs[n-1]
 			countOfPackets[index]++
+			currentSpeed.SpeedMbits += uint64(packet.ToPacket(tempPacketAddr).GetPacketLen())
 
 			for index := uint(0); index < flowNumber; index++ {
 				if countOfPackets[index] == 0 {
 					continue
 				}
 				safeEnqueue(OUT[index], OutputMbufs[index], uint(countOfPackets[index]))
-				currentSpeed += uint64(countOfPackets[index])
+				currentSpeed.SpeedPKTS += uint64(countOfPackets[index])
 				countOfPackets[index] = 0
 			}
 		}
@@ -1058,7 +1065,7 @@ func handleCheck(parameters interface{}, debug bool) bool {
 	return false
 }
 
-func handle(parameters interface{}, stopper chan int, report chan uint64, context scheduler.UserContext) {
+func handle(parameters interface{}, stopper chan int, report chan scheduler.ReportPair, context scheduler.UserContext) {
 	sp := parameters.(*handleParameters)
 	IN := sp.in
 	OUT := sp.out
@@ -1070,7 +1077,7 @@ func handle(parameters interface{}, stopper chan int, report chan uint64, contex
 	var tempPacket *packet.Packet
 	var tempPacketAddr uintptr
 	tempPackets := make([]*packet.Packet, burstSize)
-	var currentSpeed uint64
+	var currentSpeed scheduler.ReportPair
 	tick := time.Tick(time.Duration(schedTime) * time.Millisecond)
 	var pause int
 
@@ -1089,7 +1096,8 @@ func handle(parameters interface{}, stopper chan int, report chan uint64, contex
 			}
 		case <-tick:
 			report <- currentSpeed
-			currentSpeed = 0
+			currentSpeed.SpeedPKTS = 0
+			currentSpeed.SpeedMbits = 0
 		default:
 			n := IN.DequeueBurst(bufs, burstSize)
 			if n == 0 {
@@ -1105,15 +1113,17 @@ func handle(parameters interface{}, stopper chan int, report chan uint64, contex
 					tempPacketAddr = packet.ExtractPacketAddr(bufs[i+1])
 					asm.Prefetcht0(tempPacketAddr)
 					handleFunction(tempPacket, context)
+					currentSpeed.SpeedMbits += uint64(tempPacket.GetPacketLen())
 				}
 				handleFunction(packet.ToPacket(tempPacketAddr), context)
+				currentSpeed.SpeedMbits += uint64(packet.ToPacket(tempPacketAddr).GetPacketLen())
 			} else {
 				// TODO add prefetch for vector functions
 				packet.ExtractPackets(tempPackets, bufs, n)
 				vectorHandleFunction(tempPackets, n, context)
 			}
-			safeEnqueue(OUT, bufs, uint(n))
-			currentSpeed += uint64(n)
+			safeEnqueue(OUT, bufs, n)
+			currentSpeed.SpeedPKTS += uint64(n)
 		}
 	}
 }

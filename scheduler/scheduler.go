@@ -23,6 +23,12 @@ type clonePair struct {
 	channel chan int
 }
 
+// Tuple of current speed in packets and bytes
+type ReportPair struct {
+	SpeedPKTS  uint64
+	SpeedMbits uint64
+}
+
 // UserContext is used inside flow packet and is going for user via it
 type UserContext interface {
 	Copy() interface{}
@@ -31,7 +37,7 @@ type UserContext interface {
 
 // Function types which are used inside flow functions
 type uncloneFlowFunction func(interface{}, uint8)
-type cloneFlowFunction func(interface{}, chan int, chan uint64, UserContext)
+type cloneFlowFunction func(interface{}, chan int, chan ReportPair, UserContext)
 type conditionFlowFunction func(interface{}, bool) bool
 
 // FlowFunction is a structure for all functions, is used inside flow package
@@ -54,12 +60,12 @@ type FlowFunction struct {
 	clone []*clonePair
 	// Channel for reporting current speed.
 	// It is one for all clones
-	report chan uint64
+	report chan ReportPair
 	// Current saved speed when making a clone.
 	// It will be compared with immediate current speed to stop a clone.
-	previousSpeed []float64
+	previousSpeed []uint64
 	// For debug purposes
-	currentSpeed float64
+	currentSpeed ReportPair
 	// Name of flow function
 	name string
 	// Identifier which could be used together with flow function name
@@ -83,28 +89,28 @@ func (scheduler *Scheduler) NewUnclonableFlowFunction(name string, id int, ucfn 
 
 // NewClonableFlowFunction is a function for adding clonable flow functions. Is used inside flow package
 func (scheduler *Scheduler) NewClonableFlowFunction(name string, id int, cfn cloneFlowFunction,
-	par interface{}, check conditionFlowFunction, report chan uint64, context UserContext) *FlowFunction {
+	par interface{}, check conditionFlowFunction, context UserContext) *FlowFunction {
 	ff := new(FlowFunction)
 	ff.name = name
 	ff.identifier = id
 	ff.cloneFunction = cfn
 	ff.Parameters = par
 	ff.checkPrintFunction = check
-	ff.report = report
-	ff.previousSpeed = make([]float64, len(scheduler.freeCores), len(scheduler.freeCores))
+	ff.report = make(chan ReportPair, 50)
+	ff.previousSpeed = make([]uint64, len(scheduler.freeCores), len(scheduler.freeCores))
 	ff.context = context
 	return ff
 }
 
 // NewGenerateFlowFunction is a function for adding fast generate flow functions. Is used inside flow package
 func (scheduler *Scheduler) NewGenerateFlowFunction(name string, id int, cfn cloneFlowFunction,
-	par interface{}, targetSpeed float64, report chan uint64, context UserContext) *FlowFunction {
+	par interface{}, targetSpeed float64, context UserContext) *FlowFunction {
 	ff := new(FlowFunction)
 	ff.name = name
 	ff.identifier = id
 	ff.cloneFunction = cfn
 	ff.Parameters = par
-	ff.report = report
+	ff.report = make(chan ReportPair, 50)
 	ff.context = context
 	ff.targetSpeed = targetSpeed
 	return ff
@@ -234,9 +240,9 @@ func (scheduler *Scheduler) Schedule(schedTime uint) {
 			// 1. flow function has clones
 			// 2. scheduler removing is switched on
 			// 3. current speed of flow function is lower, than saved speed with less number of clones
-			if (ff.cloneNumber != 0) && (scheduler.offRemove == false) && (ff.currentSpeed < speedDelta*ff.previousSpeed[ff.cloneNumber-1]) {
+			if (ff.cloneNumber != 0) && (scheduler.offRemove == false) && (float64(ff.currentSpeed.SpeedPKTS) < speedDelta*float64(ff.previousSpeed[ff.cloneNumber-1])) {
 				// Save current speed as speed of flow function with this number of clones before removing
-				ff.previousSpeed[ff.cloneNumber] = ff.currentSpeed
+				ff.previousSpeed[ff.cloneNumber] = ff.currentSpeed.SpeedPKTS
 				scheduler.removeClone(ff)
 				ff.updatePause(ff.cloneNumber)
 				// After removing a clone we don't want to try to add clone immediately
@@ -248,9 +254,9 @@ func (scheduler *Scheduler) Schedule(schedTime uint) {
 			// 2. scheduler is switched on
 			// 3. we don't know flow function speed with more clones, or we know it and it is bigger than current speed
 			if (ff.checkPrintFunction(ff.Parameters, false) == true) && (scheduler.off == false) &&
-				(ff.previousSpeed[ff.cloneNumber+1] == 0 || ff.previousSpeed[ff.cloneNumber+1] > speedDelta*ff.currentSpeed) {
+				(ff.previousSpeed[ff.cloneNumber+1] == 0 || float64(ff.previousSpeed[ff.cloneNumber+1]) > speedDelta*float64(ff.currentSpeed.SpeedPKTS)) {
 				// Save current speed as speed of flow function with this number of clones before adding
-				ff.previousSpeed[ff.cloneNumber] = ff.currentSpeed
+				ff.previousSpeed[ff.cloneNumber] = ff.currentSpeed.SpeedPKTS
 				if scheduler.startClone(ff) == true {
 					// Add a pause to all clones. This pause depends on the number of clones.
 					ff.updatePause(ff.cloneNumber)
@@ -276,7 +282,7 @@ func (scheduler *Scheduler) Schedule(schedTime uint) {
 			ff := scheduler.Generate[i]
 			ff.updateCurrentSpeed()
 
-			speedPKTS := float64(convertPKTS(ff.currentSpeed, schedTime))
+			speedPKTS := float64(convertPKTS(ff.currentSpeed.SpeedPKTS, schedTime))
 			if speedPKTS > 1.1*ff.targetSpeed {
 				if ff.targetSpeed/float64(ff.cloneNumber+1)*float64(ff.cloneNumber) > speedPKTS {
 					if scheduler.offRemove == false {
@@ -354,36 +360,37 @@ func (ff *FlowFunction) printDebug(schedTime uint) {
 	if ff.checkPrintFunction != nil {
 		ff.checkPrintFunction(ff.Parameters, true)
 	}
-	speedPKTS := convertPKTS(ff.currentSpeed, schedTime)
-	// We multiply by 84 because it is the minimal packet size (64) plus before/after packet gaps in 40GB ethernet
-	// We multiply by 8 to translate bytes to bits
-	// We divide by 1000 and 1000 because networking suppose that megabit has 1000 kilobits instead of 1024
-	// TODO This Mbits measurement should be used only for 84 packet size for debug purposes
-	// speedMbits := speedPKTS * 84 * 8 / 1000 / 1000
+	speedPKTS := convertPKTS(ff.currentSpeed.SpeedPKTS, schedTime)
+	speedMbits := convertPKTS(ff.currentSpeed.SpeedMbits, schedTime)
 	if ff.targetSpeed == 0 {
-		common.LogDebug(common.Debug, "Current speed of", ff.name, ff.identifier, "is", speedPKTS, "PKT/S")
+		// We multiply by 20 because there are 20 bytes before/after packet gaps in 40GB ethernet
+		// We multiply by 8 to translate bytes to bits
+		// We divide by 1000 and 1000 because networking supposes that megabit has 1000 kilobits instead of 1024
+		common.LogDebug(common.Debug, "Current speed of", ff.name, ff.identifier, "is", speedPKTS, "PKT/S", (speedMbits+speedPKTS*(7+1+4+12))*8/1000/1000, "Mbits/S")
 	} else {
 		common.LogDebug(common.Debug, "Current speed of", ff.name, ff.identifier, "is", speedPKTS, "PKT/S, target speed is", int64(ff.targetSpeed), "PKT/S")
 	}
 }
 
-func convertPKTS(currentSpeed float64, schedTime uint) uint64 {
+func convertPKTS(currentSpeed uint64, schedTime uint) uint64 {
 	// We should multiply by 1000 because schedTime is in milliseconds
-	return uint64(currentSpeed) * 1000 / uint64(schedTime)
+	return currentSpeed * 1000 / uint64(schedTime)
 }
 
 func (ff *FlowFunction) updateCurrentSpeed() {
 	// Gather and sum current speeds from all clones of current flow function
 	// Flow function itself and all clones put their speeds in one channel
-	currentSpeed := uint64(0)
+	ff.currentSpeed.SpeedPKTS = 0
+	ff.currentSpeed.SpeedMbits = 0
 	t := len(ff.report) - ff.cloneNumber - 1
 	for k := 0; k < t; k++ {
 		<-ff.report
 	}
 	for k := 0; k < ff.cloneNumber+1; k++ {
-		currentSpeed += <-ff.report
+		temp := <-ff.report
+		ff.currentSpeed.SpeedPKTS += temp.SpeedPKTS
+		ff.currentSpeed.SpeedMbits += temp.SpeedMbits
 	}
-	ff.currentSpeed = float64(currentSpeed)
 }
 
 func (scheduler *Scheduler) setCore(i int) {
