@@ -11,3 +11,9 @@ examples/copy
 examples/gopacket_parser_example
 test/stash/send_fixed_number
 doc
+
+bazel-bin
+bazel-genfiles
+bazel-out
+bazel-testlogs
+bazel-yanff
