@@ -6,14 +6,6 @@
 #     build_file = "BUILD.dpdk",
 # )
 
-# DPDK archive
-new_http_archive(
-    name = "dpdk",
-    url = "http://fast.dpdk.org/rel/dpdk-17.08.tar.xz",
-    sha256 = "4bd77822ef6fe7a39ab8b11b36b86ba511282ac5ffdb81459eebb42bec5b7ef8",
-    build_file = "BUILD.dpdk",
-)
-
 # Load rules for Go compilation
 http_archive(
     name = "io_bazel_rules_go",
@@ -23,3 +15,19 @@ http_archive(
 load("@io_bazel_rules_go//go:def.bzl", "go_rules_dependencies", "go_register_toolchains")
 go_rules_dependencies()
 go_register_toolchains(go_version="host")
+
+# Dependency on github.com/pkg/errors
+load("@io_bazel_rules_go//go:def.bzl", "go_repository")
+go_repository(
+    name = "com_github_pkg_errors",
+    importpath = "github.com/pkg/errors",
+    tag = "v0.8.0",
+)
+
+# DPDK archive
+new_http_archive(
+    name = "dpdk",
+    url = "http://fast.dpdk.org/rel/dpdk-17.08.tar.xz",
+    sha256 = "4bd77822ef6fe7a39ab8b11b36b86ba511282ac5ffdb81459eebb42bec5b7ef8",
+    build_file = "BUILD.dpdk",
+)
