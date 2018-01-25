@@ -1,10 +1,13 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_prefix", "go_binary", "go_library", "go_test")
+load("//mk:rules.bzl", "simple_yanff_program")
 
-go_binary(
+simple_yanff_program(
     name = "demo",
-    srcs = ["demo.go"],
-    deps = [
-        "//flow",
-        "//packet",
-    ],
+)
+
+simple_yanff_program(
+    name = "dump",
+)
+
+simple_yanff_program(
+    name = "Firewall",
 )
