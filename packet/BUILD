@@ -5,12 +5,11 @@ go_library(
     srcs = [
         "acl.go",
         "arp.go",
-        "arp_test.go",
         "checksum.go",
+        "gtp.go",
+        "mpls.go",
         "packet.go",
         "pcap_utils.go",
-        "pcap_utils_internal_test.go",
-        "test_utils.go",
         "vlan.go",
     ],
     deps = [

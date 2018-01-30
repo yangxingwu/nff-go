@@ -1,13 +1,33 @@
-load("//mk:rules.bzl", "simple_yanff_program")
+load("//mk:rules.bzl", "yanff_program", "simple_yanff_program", "generate_simple_program_macros")
 
-simple_yanff_program(
-    name = "demo",
-)
+generate_simple_program_macros(
+    [
+        "demo",
+        "dump",
+        "Forwarding",
+        "Firewall",
+        "clonable_pcap_dumper",
+        "kni",
+        "copy",
+        "ErrorHandling",
+        "antiddos/generatorForAntiDDoS",
+        "antiddos/antiDDoS",
+    ])
 
-simple_yanff_program(
-    name = "dump",
-)
-
-simple_yanff_program(
-    name = "Firewall",
-)
+[yanff_program(
+    name = "tutorial/" + n,
+    srcs = [ "tutorial/" + n + ".go", "tutorial/common.go", ])
+ for n in [
+         "genscripts",
+         "step1",
+         "step2",
+         "step3",
+         "step4",
+         "step5",
+         "step6",
+         "step7",
+         "step8",
+         "step9",
+         "step10",
+         "step11",
+]]

@@ -24,6 +24,21 @@ go_repository(
     tag = "v0.8.0",
 )
 
+# Dependency on github.com/docker/docker
+go_repository(
+    name = "com_github_docker_docker",
+    importpath = "github.com/docker/docker",
+    urls = [ "https://github.com/moby/moby/archive/v17.05.0-ce.tar.gz" ],
+    sha256 = "7630ac68796bcb48a7daa6492e6c2c25f7e3630cafadde2c58d078edcb7fdc5c",
+)
+
+# Dependency on github.com/docker/go-connections
+go_repository(
+    name = "com_github_docker_go-connections",
+    importpath = "github.com/docker/go-connections",
+    tag = "v0.3.0",
+)
+
 # DPDK archive
 new_http_archive(
     name = "dpdk",
