@@ -100,18 +100,18 @@ type Kni struct {
 }
 
 type receiveParameters struct {
-	out   *low.Ring
-	queue int16
-	port  uint8
+	out  *low.Ring
+	port *low.Port
+	kni  bool
 }
 
-func makeReceiver(port uint8, queue int16, out *low.Ring) *scheduler.FlowFunction {
+func makeReceiver(kni bool, port uint8, out *low.Ring) *scheduler.FlowFunction {
 	par := new(receiveParameters)
-	par.port = port
-	par.queue = queue
+	par.port = low.GetPort(port)
 	par.out = out
+	par.kni = kni
 	ffCount++
-	return schedState.NewUnclonableFlowFunction("receiver", ffCount, receive, par)
+	return schedState.NewFF("receiver", ffCount, nil, receive, nil, par, receiveCheck, 0, nil, nil, par.port)
 }
 
 type generateParameters struct {
@@ -126,7 +126,7 @@ func makeGenerator(out *low.Ring, generateFunction GenerateFunction) *scheduler.
 	par.out = out
 	par.generateFunction = generateFunction
 	ffCount++
-	return schedState.NewUnclonableFlowFunction("generator", ffCount, generateOne, par)
+	return schedState.NewFF("generator", ffCount, generateOne, nil, nil, par, nil, 0, nil, nil, nil)
 }
 
 func makeFastGenerator(out *low.Ring, generateFunction GenerateFunction,
@@ -137,7 +137,7 @@ func makeFastGenerator(out *low.Ring, generateFunction GenerateFunction,
 	par.mempool = low.CreateMempool()
 	par.vectorGenerateFunction = vectorGenerateFunction
 	ffCount++
-	return schedState.NewGenerateFlowFunction("fast generator", ffCount, generatePerf, par, float64(targetSpeed), make(chan uint64, 50), context)
+	return schedState.NewFF("fast generator", ffCount, nil, nil, generatePerf, par, nil, float64(targetSpeed), make(chan uint64, 50), context, nil)
 }
 
 type sendParameters struct {
@@ -152,7 +152,7 @@ func makeSender(port uint8, queue int16, in *low.Ring) *scheduler.FlowFunction {
 	par.queue = queue
 	par.in = in
 	ffCount++
-	return schedState.NewUnclonableFlowFunction("sender", ffCount, send, par)
+	return schedState.NewFF("sender", ffCount, send, nil, nil, par, nil, 0, nil, nil, nil)
 }
 
 type copyParameters struct {
@@ -169,7 +169,7 @@ func makeCopier(in *low.Ring, out *low.Ring, outCopy *low.Ring) *scheduler.FlowF
 	par.outCopy = outCopy
 	par.mempool = low.CreateMempool()
 	ffCount++
-	return schedState.NewClonableFlowFunction("copy", ffCount, pcopy, par, copyCheck, make(chan uint64, 50), nil)
+	return schedState.NewFF("copy", ffCount, nil, nil, pcopy, par, copyCheck, 0, make(chan uint64, 50), nil, nil)
 }
 
 type partitionParameters struct {
@@ -188,7 +188,7 @@ func makePartitioner(in *low.Ring, outFirst *low.Ring, outSecond *low.Ring, N ui
 	par.N = N
 	par.M = M
 	ffCount++
-	return schedState.NewUnclonableFlowFunction("partitioner", ffCount, partition, par)
+	return schedState.NewFF("partitioner", ffCount, partition, nil, nil, par, nil, 0, nil, nil, nil)
 }
 
 type separateParameters struct {
@@ -209,7 +209,7 @@ func makeSeparator(in *low.Ring, outTrue *low.Ring, outFalse *low.Ring,
 	par.separateFunction = separateFunction
 	par.vectorSeparateFunction = vectorSeparateFunction
 	ffCount++
-	return schedState.NewClonableFlowFunction(name, ffCount, separate, par, separateCheck, make(chan uint64, 50), context)
+	return schedState.NewFF(name, ffCount, nil, nil, separate, par, separateCheck, 0, make(chan uint64, 50), context, nil)
 }
 
 type splitParameters struct {
@@ -227,7 +227,7 @@ func makeSplitter(in *low.Ring, outs []*low.Ring,
 	par.splitFunction = splitFunction
 	par.flowNumber = flowNumber
 	ffCount++
-	return schedState.NewClonableFlowFunction("splitter", ffCount, split, par, splitCheck, make(chan uint64, 50), context)
+	return schedState.NewFF("splitter", ffCount, nil, nil, split, par, splitCheck, 0, make(chan uint64, 50), context, nil)
 }
 
 type handleParameters struct {
@@ -246,7 +246,7 @@ func makeHandler(in *low.Ring, out *low.Ring,
 	par.handleFunction = handleFunction
 	par.vectorHandleFunction = vectorHandleFunction
 	ffCount++
-	return schedState.NewClonableFlowFunction(name, ffCount, handle, par, handleCheck, make(chan uint64, 50), context)
+	return schedState.NewFF(name, ffCount, nil, nil, handle, par, handleCheck, 0, make(chan uint64, 50), context, nil)
 }
 
 type writeParameters struct {
@@ -259,7 +259,7 @@ func makeWriter(filename string, in *low.Ring) *scheduler.FlowFunction {
 	par.in = in
 	par.filename = filename
 	ffCount++
-	return schedState.NewUnclonableFlowFunction("writer", ffCount, write, par)
+	return schedState.NewFF("writer", ffCount, write, nil, nil, par, nil, 0, nil, nil, nil)
 }
 
 type readParameters struct {
@@ -274,7 +274,7 @@ func makeReader(filename string, out *low.Ring, repcount int32) *scheduler.FlowF
 	par.filename = filename
 	par.repcount = repcount
 	ffCount++
-	return schedState.NewUnclonableFlowFunction("reader", ffCount, read, par)
+	return schedState.NewFF("reader", ffCount, read, nil, nil, par, nil, 0, nil, nil, nil)
 }
 
 var burstSize uint
@@ -284,21 +284,13 @@ var maxPacketsToClone uint32
 var hwtxchecksum bool
 
 type port struct {
-	rxQueues       []bool
-	txQueues       []bool
-	config         int
-	rxQueuesNumber int16
+	wasRequested   bool
 	txQueuesNumber int16
+	willReceive    bool
 	port           uint8
 }
 
 var schedState scheduler.Scheduler
-
-// Flow port types
-const (
-	inactivePort = iota
-	autoPort
-)
 
 // Config is a struct with all parameters, which user can pass to NFF-GO library
 type Config struct {
@@ -432,7 +424,6 @@ func SystemInit(args *Config) error {
 	createdPorts = make([]port, low.GetPortsNumber(), low.GetPortsNumber())
 	for i := range createdPorts {
 		createdPorts[i].port = uint8(i)
-		createdPorts[i].config = inactivePort
 	}
 	// Init scheduler
 	common.LogTitle(common.Initialization, "------------***------ Initializing scheduler -----***------------")
@@ -452,13 +443,13 @@ func SystemInit(args *Config) error {
 // Function can panic during execution.
 func SystemStart() error {
 	common.LogTitle(common.Initialization, "------------***--------- Checking system ---------***------------")
-	if err := checkSystem(); err != nil {
-		return err
+	if openFlowsNumber != 0 {
+		return common.WrapWithNFError(nil, "Some flows are left open at the end of configuration!", common.OpenedFlowAtTheEnd)
 	}
 	common.LogTitle(common.Initialization, "------------***---------- Creating ports ---------***------------")
 	for i := range createdPorts {
-		if createdPorts[i].config != inactivePort {
-			if err := low.CreatePort(createdPorts[i].port, uint16(createdPorts[i].rxQueuesNumber),
+		if createdPorts[i].wasRequested {
+			if err := low.CreatePort(createdPorts[i].port, createdPorts[i].willReceive,
 				uint16(createdPorts[i].txQueuesNumber), hwtxchecksum); err != nil {
 				return err
 			}
@@ -524,15 +515,17 @@ func SetReceiver(port uint8) (OUT *Flow, err error) {
 	if port >= uint8(len(createdPorts)) {
 		return nil, common.WrapWithNFError(nil, "Requested receive port exceeds number of ports which can be used by DPDK (bind to DPDK).", common.ReqTooManyPorts)
 	}
-	createdPorts[port].config = autoPort
-	createdPorts[port].rxQueues = append(createdPorts[port].rxQueues, true)
+	if createdPorts[port].willReceive {
+		return nil, common.WrapWithNFError(nil, "Requested receive port was already set to receive. Two receives from one port are prohibited.", common.DoubleReceivePort)
+	}
+	createdPorts[port].wasRequested = true
+	createdPorts[port].willReceive = true
 	ring := low.CreateRing(generateRingName(), burstSize*sizeMultiplier)
-	recv := makeReceiver(port, createdPorts[port].rxQueuesNumber, ring)
-	schedState.UnClonable = append(schedState.UnClonable, recv)
+	recv := makeReceiver(false, port, ring)
+	schedState.Receive = append(schedState.Receive, recv)
 	OUT = new(Flow)
 	OUT.current = ring
 	openFlowsNumber++
-	createdPorts[port].rxQueuesNumber++
 	return OUT, nil
 }
 
@@ -543,7 +536,7 @@ func SetReceiver(port uint8) (OUT *Flow, err error) {
 // Function can panic during execution.
 func SetReceiverKNI(kni *Kni) (OUT *Flow) {
 	ring := low.CreateRing(generateRingName(), burstSize*sizeMultiplier)
-	recvKni := makeReceiver(kni.port, -1, ring)
+	recvKni := makeReceiver(true, kni.port, ring)
 	schedState.UnClonable = append(schedState.UnClonable, recvKni)
 	OUT = new(Flow)
 	OUT.current = ring
@@ -618,8 +611,7 @@ func SetSender(IN *Flow, port uint8) error {
 	if port >= uint8(len(createdPorts)) {
 		return common.WrapWithNFError(nil, "Requested send port exceeds number of ports which can be used by DPDK (bind to DPDK).", common.ReqTooManyPorts)
 	}
-	createdPorts[port].config = autoPort
-	createdPorts[port].txQueues = append(createdPorts[port].txQueues, true)
+	createdPorts[port].wasRequested = true
 	send := makeSender(port, createdPorts[port].txQueuesNumber, IN.current)
 	createdPorts[port].txQueuesNumber++
 	schedState.UnClonable = append(schedState.UnClonable, send)
@@ -858,9 +850,18 @@ func GetPortMACAddress(port uint8) [common.EtherAddrLen]uint8 {
 	return low.GetPortMACAddress(port)
 }
 
-func receive(parameters interface{}, coreID uint8) {
+func receiveCheck(parameters interface{}, debug bool) int {
 	srp := parameters.(*receiveParameters)
-	low.Receive(srp.port, srp.queue, srp.out, coreID)
+	return low.FullRSS(srp.port)
+}
+
+func receive(parameters interface{}, flag *int, coreID uint8) {
+	srp := parameters.(*receiveParameters)
+	if srp.kni {
+		low.Receive(uint8(srp.port.Port), -1, srp.out, flag, coreID)
+	} else {
+		low.Receive(uint8(srp.port.Port), int16(srp.port.N-1), srp.out, flag, coreID)
+	}
 }
 
 func generateOne(parameters interface{}, core uint8) {
@@ -941,16 +942,16 @@ func generatePerf(parameters interface{}, stopper chan int, report chan uint64, 
 	}
 }
 
-func copyCheck(parameters interface{}, debug bool) bool {
+func copyCheck(parameters interface{}, debug bool) int {
 	cp := parameters.(*copyParameters)
 	IN := cp.in
 	if debug == true {
 		common.LogDebug(common.Debug, "Number of packets in queue for copy: ", IN.GetRingCount())
 	}
 	if IN.GetRingCount() > maxPacketsToClone {
-		return true
+		return 1
 	}
-	return false
+	return 0
 }
 
 // TODO reassembled packets are not supported
@@ -1083,16 +1084,16 @@ func merge(from *low.Ring, to *low.Ring) {
 	}
 }
 
-func separateCheck(parameters interface{}, debug bool) bool {
+func separateCheck(parameters interface{}, debug bool) int {
 	sp := parameters.(*separateParameters)
 	IN := sp.in
 	if debug == true {
 		common.LogDebug(common.Debug, "Number of packets in queue for separate: ", IN.GetRingCount())
 	}
 	if IN.GetRingCount() > maxPacketsToClone {
-		return true
+		return 1
 	}
-	return false
+	return 0
 }
 
 func separate(parameters interface{}, stopper chan int, report chan uint64, context scheduler.UserContext) {
@@ -1238,16 +1239,16 @@ func partition(parameters interface{}, core uint8) {
 	}
 }
 
-func splitCheck(parameters interface{}, debug bool) bool {
+func splitCheck(parameters interface{}, debug bool) int {
 	sp := parameters.(*splitParameters)
 	IN := sp.in
 	if debug == true {
 		common.LogDebug(common.Debug, "Number of packets in queue for split: ", IN.GetRingCount())
 	}
 	if IN.GetRingCount() > maxPacketsToClone {
-		return true
+		return 1
 	}
-	return false
+	return 0
 }
 
 func split(parameters interface{}, stopper chan int, report chan uint64, context scheduler.UserContext) {
@@ -1319,16 +1320,16 @@ func split(parameters interface{}, stopper chan int, report chan uint64, context
 	}
 }
 
-func handleCheck(parameters interface{}, debug bool) bool {
+func handleCheck(parameters interface{}, debug bool) int {
 	sp := parameters.(*handleParameters)
 	IN := sp.in
 	if debug == true {
 		common.LogDebug(common.Debug, "Number of packets in queue for handle: ", IN.GetRingCount())
 	}
 	if IN.GetRingCount() > maxPacketsToClone {
-		return true
+		return 1
 	}
-	return false
+	return 0
 }
 
 func handle(parameters interface{}, stopper chan int, report chan uint64, context scheduler.UserContext) {
@@ -1504,31 +1505,6 @@ func checkFlow(f *Flow) error {
 	}
 	if f.current == nil {
 		return common.WrapWithNFError(nil, "One of the flows is used after it was closed!", common.UseClosedFlowErr)
-	}
-	return nil
-}
-
-func checkSystem() error {
-	if openFlowsNumber != 0 {
-		return common.WrapWithNFError(nil, "Some flows are left open at the end of configuration!", common.OpenedFlowAtTheEnd)
-	}
-	for i := range createdPorts {
-		if createdPorts[i].config == inactivePort {
-			continue
-		}
-		if createdPorts[i].rxQueuesNumber == 0 && createdPorts[i].txQueuesNumber == 0 {
-			return common.WrapWithNFError(nil, "port has no send and receive queues. It is an error in DPDK.", common.PortHasNoQueues)
-		}
-		for j := range createdPorts[i].rxQueues {
-			if createdPorts[i].rxQueues[j] != true {
-				return common.WrapWithNFError(nil, "port doesn't use all receive queues, packets can be missed due to RSS!", common.NotAllQueuesUsed)
-			}
-		}
-		for j := range createdPorts[i].txQueues {
-			if createdPorts[i].txQueues[j] != true {
-				return common.WrapWithNFError(nil, "port has unused send queue. Performance can be lower than it is expected!", common.NotAllQueuesUsed)
-			}
-		}
 	}
 	return nil
 }

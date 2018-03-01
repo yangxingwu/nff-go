@@ -22,6 +22,7 @@ const generatePauseStep = 0.1
 type clonePair struct {
 	index   int
 	channel chan int
+	flag    int
 }
 
 // UserContext is used inside flow packet and is going for user via it
@@ -33,7 +34,8 @@ type UserContext interface {
 // Function types which are used inside flow functions
 type uncloneFlowFunction func(interface{}, uint8)
 type cloneFlowFunction func(interface{}, chan int, chan uint64, UserContext)
-type conditionFlowFunction func(interface{}, bool) bool
+type receiveFlowFunction func(interface{}, *int, uint8)
+type conditionFlowFunction func(interface{}, bool) int
 
 // FlowFunction is a structure for all functions, is used inside flow package
 type FlowFunction struct {
@@ -41,6 +43,8 @@ type FlowFunction struct {
 	Parameters interface{}
 	// Main body of unclonable flow function
 	uncloneFunction uncloneFlowFunction
+	// Main body of receive flow function
+	receiveFunction receiveFlowFunction
 	// Main body of clonable flow function
 	cloneFunction cloneFlowFunction
 	// Function true or false
@@ -69,45 +73,23 @@ type FlowFunction struct {
 	context     UserContext
 	targetSpeed float64
 	pause       int
+	port        *low.Port
 }
 
-// NewUnclonableFlowFunction is a function for adding unclonable flow functions. Is used inside flow package
-func (scheduler *Scheduler) NewUnclonableFlowFunction(name string, id int, ucfn uncloneFlowFunction,
-	par interface{}) *FlowFunction {
+func (scheduler *Scheduler) NewFF(name string, id int, ucfn uncloneFlowFunction, rfn receiveFlowFunction, cfn cloneFlowFunction,
+	par interface{}, check conditionFlowFunction, targetSpeed float64, report chan uint64, context UserContext, port *low.Port) *FlowFunction {
 	ff := new(FlowFunction)
 	ff.name = name
 	ff.identifier = id
 	ff.uncloneFunction = ucfn
-	ff.Parameters = par
-	return ff
-}
-
-// NewClonableFlowFunction is a function for adding clonable flow functions. Is used inside flow package
-func (scheduler *Scheduler) NewClonableFlowFunction(name string, id int, cfn cloneFlowFunction,
-	par interface{}, check conditionFlowFunction, report chan uint64, context UserContext) *FlowFunction {
-	ff := new(FlowFunction)
-	ff.name = name
-	ff.identifier = id
+	ff.receiveFunction = rfn
 	ff.cloneFunction = cfn
 	ff.Parameters = par
 	ff.checkPrintFunction = check
 	ff.report = report
-	ff.previousSpeed = make([]float64, len(scheduler.cores), len(scheduler.cores))
-	ff.context = context
-	return ff
-}
-
-// NewGenerateFlowFunction is a function for adding fast generate flow functions. Is used inside flow package
-func (scheduler *Scheduler) NewGenerateFlowFunction(name string, id int, cfn cloneFlowFunction,
-	par interface{}, targetSpeed float64, report chan uint64, context UserContext) *FlowFunction {
-	ff := new(FlowFunction)
-	ff.name = name
-	ff.identifier = id
-	ff.cloneFunction = cfn
-	ff.Parameters = par
-	ff.report = report
 	ff.context = context
 	ff.targetSpeed = targetSpeed
+	ff.port = port
 	return ff
 }
 
@@ -116,6 +98,7 @@ type Scheduler struct {
 	Clonable          []*FlowFunction
 	UnClonable        []*FlowFunction
 	Generate          []*FlowFunction
+	Receive           []*FlowFunction
 	cores             []core
 	off               bool
 	offRemove         bool
@@ -195,15 +178,27 @@ func (scheduler *Scheduler) SystemStart() (err error) {
 			ff.uncloneFunction(ff.Parameters, uint8(core))
 		}()
 	}
+	for i := range scheduler.Receive {
+		ff := scheduler.Receive[i]
+		index := scheduler.getCoreIndex()
+		if index == -1 {
+			return err
+		}
+		core := scheduler.cores[index].id
+		common.LogDebug(common.Initialization, "Start receive FlowFunction", ff.name, ff.identifier, "at", core, "core")
+		a := int(1)
+		low.IncreaseRSS(ff.port)
+		go func() {
+			ff.receiveFunction(ff.Parameters, &a, uint8(core))
+		}()
+	}
 	for i := range scheduler.Clonable {
-		err = scheduler.startClonable(scheduler.Clonable[i])
-		if err != nil {
+		if err := scheduler.startClonable(scheduler.Clonable[i]); err != nil {
 			return err
 		}
 	}
 	for i := range scheduler.Generate {
-		err = scheduler.startClonable(scheduler.Generate[i])
-		if err != nil {
+		if err := scheduler.startClonable(scheduler.Generate[i]); err != nil {
 			return err
 		}
 	}
@@ -287,7 +282,7 @@ func (scheduler *Scheduler) Schedule(schedTime uint) {
 			// 1. check function signals that we need to clone
 			// 2. scheduler is switched on
 			// 3. we don't know flow function speed with more clones, or we know it and it is bigger than current speed
-			if (ff.checkPrintFunction(ff.Parameters, false) == true) && (scheduler.off == false) &&
+			if (ff.checkPrintFunction(ff.Parameters, false) == 1) && (scheduler.off == false) &&
 				(ff.previousSpeed[ff.cloneNumber+1] == 0 || ff.previousSpeed[ff.cloneNumber+1] > speedDelta*ff.currentSpeed) {
 				// Save current speed as speed of flow function with this number of clones before adding
 				ff.previousSpeed[ff.cloneNumber] = ff.currentSpeed
@@ -346,6 +341,16 @@ func (scheduler *Scheduler) Schedule(schedTime uint) {
 				}
 			}
 		}
+		for i := range scheduler.Receive {
+			ff := scheduler.Receive[i]
+			if ff.checkPrintFunction(ff.Parameters, true) == 1 && (scheduler.off == false) {
+				low.IncreaseRSS(ff.port)
+				scheduler.startClone(ff)
+			} else if (ff.cloneNumber != 0) && (scheduler.offRemove == false) && (ff.checkPrintFunction(ff.Parameters, true) == -1) {
+				scheduler.removeClone(ff)
+				low.DecreaseRSS(ff.port)
+			}
+		}
 		checkRequired = false
 		runtime.Gosched()
 	}
@@ -358,28 +363,38 @@ func (scheduler *Scheduler) startClone(ff *FlowFunction) bool {
 		return false
 	}
 	core := scheduler.cores[index].id
-	quit := make(chan int)
 	cp := new(clonePair)
-	cp.channel = quit
 	cp.index = index
+	if ff.report != nil {
+		cp.channel = make(chan int)
+	}
+	cp.flag = 1
 	ff.clone = append(ff.clone, cp)
 	ff.cloneNumber++
 	go func() {
-		err := low.SetAffinity(uint8(core))
-		if err != nil {
-			common.LogFatal(common.Debug, "Failed to set affinity to", core, "core: ", err)
-		}
-		if ff.context != nil {
-			ff.cloneFunction(ff.Parameters, quit, ff.report, (ff.context.Copy()).(UserContext))
+		if ff.report != nil {
+			err := low.SetAffinity(uint8(core))
+			if err != nil {
+				common.LogFatal(common.Debug, "Failed to set affinity to", core, "core: ", err)
+			}
+			if ff.context != nil {
+				ff.cloneFunction(ff.Parameters, cp.channel, ff.report, (ff.context.Copy()).(UserContext))
+			} else {
+				ff.cloneFunction(ff.Parameters, cp.channel, ff.report, nil)
+			}
 		} else {
-			ff.cloneFunction(ff.Parameters, quit, ff.report, nil)
+			ff.receiveFunction(ff.Parameters, &cp.flag, uint8(core))
 		}
 	}()
 	return true
 }
 
 func (scheduler *Scheduler) removeClone(ff *FlowFunction) {
-	ff.clone[ff.cloneNumber-1].channel <- -1
+	if ff.clone[ff.cloneNumber-1].channel != nil {
+		ff.clone[ff.cloneNumber-1].channel <- -1
+	} else {
+		ff.clone[ff.cloneNumber-1].flag = 0
+	}
 	scheduler.setCoreByIndex(ff.clone[ff.cloneNumber-1].index)
 	ff.clone = ff.clone[:len(ff.clone)-1]
 	ff.cloneNumber--
