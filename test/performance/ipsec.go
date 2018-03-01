@@ -36,10 +36,12 @@ func main() {
 	flag.UintVar(&outport, "outport", 1, "port for sender")
 	flag.UintVar(&inport, "inport", 0, "port for receiver")
 	flag.BoolVar(&noscheduler, "no-scheduler", false, "disable scheduler")
+	dpdkLogLevel := *(flag.String("dpdk", "--log-level=0", "Passes an arbitrary argument to dpdk EAL"))
 	flag.Parse()
 
 	config := flow.Config{
 		DisableScheduler: noscheduler,
+		DPDKArgs:         []string{dpdkLogLevel},
 	}
 	CheckFatal(flow.SystemInit(&config))
 

@@ -29,11 +29,13 @@ func main() {
 	flag.UintVar(&inport, "inport", 0, "Input port number")
 	flag.UintVar(&outport, "outport", 0, "Output port number")
 	flag.StringVar(&cores, "cores", "", "Specifies CPU cores to be used by NFF-GO library")
+	dpdkLogLevel := *(flag.String("dpdk", "--log-level=0", "Passes an arbitrary argument to dpdk EAL"))
 	flag.Parse()
 
 	// Initialize NFF-GO library to use specified number of CPU cores
 	config := flow.Config{
-		CPUList: cores,
+		CPUList:  cores,
+		DPDKArgs: []string{dpdkLogLevel},
 	}
 	CheckFatal(flow.SystemInit(&config))
 
