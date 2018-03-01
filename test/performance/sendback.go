@@ -28,7 +28,7 @@ func CheckFatal(err error) {
 func main() {
 	flag.UintVar(&inport, "inport", 0, "Input port number")
 	flag.UintVar(&outport, "outport", 0, "Output port number")
-	flag.StringVar(&cores, "cores", "0-15", "Specifies CPU cores to be used by NFF-GO library")
+	flag.StringVar(&cores, "cores", "", "Specifies CPU cores to be used by NFF-GO library")
 	flag.Parse()
 
 	// Initialize NFF-GO library to use specified number of CPU cores

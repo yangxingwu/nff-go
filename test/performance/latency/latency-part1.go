@@ -104,9 +104,7 @@ func main() {
 	testDoneEvent = sync.NewCond(&m)
 
 	// Initialize NFF-GO library at 30 available cores
-	config := flow.Config{
-		CPUList: "0-29",
-	}
+	config := flow.Config{}
 	CheckFatal(flow.SystemInit(&config))
 	payloadSize = packetSize - servDataSize
 
